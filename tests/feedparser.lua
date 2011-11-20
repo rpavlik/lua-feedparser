@@ -87,3 +87,23 @@ local feed = [[<?xml version="1.0" encoding="utf-8"?>
 </feed>]]
 local res = assert(feedparser.parse(feed, "http://bacon.net"))
 assert(res.feed.link=="http://bacon.net/excellent")
+
+print("namespace matching")
+local feed = [[
+<rss xmlns:a10="http://www.w3.org/2005/Atom" version="2.0">
+  <channel>
+    <title>Feed using namespaces</title>
+    <link>http://example.com/news.xml</link>
+    <a10:id>some id</a10:id>
+    <item>
+      <guid isPermaLink="false">66822</guid>
+      <link>http://example.com/66822-some-news.htm</link>
+      <title>Some news</title>
+      <description>Example entry with an Atom date</description>
+      <a10:updated>2011-11-04T15:39:16+01:00</a10:updated>
+    </item>
+  </channel>
+</rss>
+]]
+local res = assert(feedparser.parse(feed))
+assert(res.entries[1].updated)

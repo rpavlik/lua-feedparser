@@ -5,6 +5,8 @@ local URL = require "feedparser.url"
 local tinsert, tremove, tconcat = table.insert, table.remove, table.concat
 local pairs, ipairs = pairs, ipairs
 
+local print, tostring = print, tostring
+
 --- feedparser, similar to the Universal Feed Parser for python, but a good deal weaker.
 -- see http://feedparser.org for details about the Universal Feed Parser
 module('feedparser')
@@ -24,100 +26,119 @@ local function rebase(el, base_uri)
 	return resolve(xml_base, base_uri)
 end
 
-local function parse_entries(entries_el, format_str, base)
+
+-- TODO memoize function results (create multiple closures with same values)
+-- Create a simple tag function which puts the element content into entry field
+local function simple_tag_factory(tag_name)
+	return function(entry, element)
+		entry[tag_name] = element:getText()
+	end
+end
+
+-- Create both raw date field and parsed one
+local function date_tag_factory(tag_name)
+	local parsed_tag_name = tag_name .. "_parsed"
+	return function(entry, element)
+		entry[tag_name] = element:getText()
+		entry[parsed_tag_name] = dateparser.parse(entry[tag_name])
+	end
+end
+
+-- Create a field to a resolved url
+local function url_tag_factory(tag_name)
+	return function(entry, element, entry_base)
+		entry[tag_name] = resolve(element:getText(), rebase(element, entry_base))
+	end
+end
+
+local function parse_author(entry, element, entry_base)
+	entry.author = (element:getChild('name') or element):getText()
+	entry.author_detail = {
+		name = entry.author,
+		email = (element:getChild('email') or blanky):getText()
+	}
+	local author_url = (element:getChild('url') or blanky):getText()
+	if author_url and author_url ~= "" then
+		entry.author_detail.href = resolve(author_url, rebase(author_url, rebase(element, entry_base)))
+	end
+end
+
+-- mappigns for each standard, maps xml entry name to a function gets entry and element as parameters
+local ENTRY_MAPPING = {
+	rss20 = { -- does RSS have a definition URL ?
+		title = simple_tag_factory("title"),
+		link = function(entry, element, entry_base)
+			entry.link = resolve(element:getText(), rebase(element, entry_base))
+			tinsert(entry.links, {href=entry.link})
+		end,
+		enclosure = function(entry, element)
+			tinsert(entry.enclosures, {
+			  url=element:getAttr('url'),
+			  length=element:getAttr('length'),
+			  type=element:getAttr('type')
+			})
+		end,
+		description = simple_tag_factory("summary"),
+		body = simple_tag_factory("content"),
+		fullitem = simple_tag_factory("content"),
+		pubDate = date_tag_factory("updated"),
+		guid = url_tag_factory("id"),
+		--todo xhtml:body, content:encoded,
+		author = parse_author
+	},
+	["http://purl.org/dc/elements/1.1/"] = {
+		title = simple_tag_factory("title"),
+		description = simple_tag_factory("summary"),
+		date = date_tag_factory("updated"),
+		creator = parse_author
+		--dcterms: issued, created
+	},
+	["http://www.w3.org/1999/02/22-rdf-syntax-ns#"] = {
+		title = simple_tag_factory("title"),
+		description = simple_tag_factory("summary"),
+	},
+	["http://www.w3.org/2005/Atom"] = {
+		title = simple_tag_factory("title"),
+		link = function(entry, element, entry_base)
+			local link = {
+			  href = resolve(element:getAttr("href"), rebase(element, entry_base)),
+			  rel = element.getAttr("rel"),
+			  type = element.getAttr("type"),
+			  title = element.getAttr("title"),
+			}
+			tinsert(entry.links, link)
+			if link.rel == "enclosure" then
+				tinsert(entry.enclosures, {
+				  href=link.href,
+				  length=element:getAttr('length'),
+				  type=element:getAttr('type')
+				})
+			end
+		end,
+		summary = simple_tag_factory("summary"),
+		content = simple_tag_factory("content"),
+		published = date_tag_factory("published"),
+		issued = date_tag_factory("issued"),
+		updated = date_tag_factory("updated"),
+		modified = date_tag_factory("updated"),
+		created = date_tag_factory("created"),
+		id = url_tag_factory("id"),
+		author = parse_author
+	},
+}
+
+local function parse_entries(entries_el, tags_callbacks, format_str, base)
 	local entries = {}
 	for i, entry_el in ipairs(entries_el) do
 		local entry = {enclosures={}, links={}, contributors={}}
 		local entry_base = rebase(entry_el, base)
 		for i, el in ipairs(entry_el:getChildren('*')) do
-			local tag = el:getTag()
-			local el_base = rebase(el, entry_base)
-			--title
-			if tag == 'title' or tag == 'dc:title' or tag =='rdf:title' then --'dc:title' doesn't occur in atom feeds, but whatever.
-				entry.title=el:getText()
-				
-			--link(s)
-			elseif format_str == 'rss' and tag=='link' then
-				entry.link=resolve(el:getText(), el_base)
-				tinsert(entry.links, {href=entry.link})
-				
-			elseif	(format_str=='atom' and tag == 'link') or 
-					(format_str == 'rss' and tag=='atom:link') then
-				local link = {}
-				for i, attr in ipairs{'rel','type', 'href','title'} do
-					link[attr]= (attr=='href') and resolve(el:getAttr(attr), el_base) or el:getAttr(attr) --uri
-				end
-				tinsert(entry.links, link)
-				if link.rel=='enclosure' then
-					tinsert(entry.enclosures, {
-						href=link.href,
-						length=el:getAttr('length'),
-						type=el:getAttr('type')
-					})
-				end
-			
-			--rss enclosures
-			elseif format_str == 'rss' and tag=='enclosure' then
-				tinsert(entry.enclosures, {
-					url=el:getAttr('url'),
-					length=el:getAttr('length'),
-					type=el:getAttr('type')
-				})
-				
-			--summary
-			elseif	(format_str=='atom' and tag=='summary') or
-					(format_str=='rss' and(tag=='description' or tag=='dc:description' or tag=='rdf:description')) then
-				entry.summary=el:getText()
-				--TODO: summary_detail
-			
-			--content
-			elseif	(format_str=='atom' and tag=='content') or 
-					(format_str=='rss' and (tag=='body' or tag=='xhtml:body' or tag == 'fullitem' or tag=='content:encoded')) then 
-				entry.content=el:getText()			
-				--TODO: content_detail
-			
-			--published
-			elseif	(format_str == 'atom' and (tag=='published' or tag=='issued')) or
-					(format_str == 'rss' and (tag=='dcterms:issued' or tag=='atom:published' or tag=='atom:issued')) then
-				entry.published = el:getText()
-				entry.published_parsed=dateparser.parse(entry.published)
-				
-			--updated
-			elseif	(format_str=='atom' and (tag=='updated' or tag=='modified')) or
-					(format_str=='rss' and (tag=='dc:date' or tag=='pubDate' or tag=='dcterms:modified')) then
-				entry.updated=el:getText()
-				entry.updated_parsed=dateparser.parse(entry.updated)
-			
-			elseif tag=='created' or tag=='atom:created' or tag=='dcterms:created' then
-				entry.created=el:getText()
-				entry.created_parsed=dateparser.parse(entry.created)
-			
-			--id
-			elseif	(format_str =='atom' and tag=='id') or
-					(format_str=='rss' and tag=='guid') then
-				entry.id=resolve(el:getText(), el_base)  -- this is a uri, right?...
-			
-			--author
-			elseif format_str=='rss' and (tag=='author' or tag=='dc:creator') then --author tag should give the author's email. should I respect this?
-				entry.author=(el:getChild('name') or el):getText()
-				entry.author_detail={
-					name=entry.author
-				}
-			elseif format_str=='atom' and tag=='author' then
-				entry.author=(el:getChild('name') or el):getText()
-				entry.author_detail = {
-					name=entry.author,
-					email=(el:getChild('email') or blanky):getText() 
-				}
-				local author_url = (el:getChild('url') or blanky):getText()
-				if author_url and author_url ~= "" then entry.author_detail.href=resolve(author_url, rebase(el:getChild('url'), el_base)) end		
-			
-			elseif tag=='category' or tag=='dc:subject' then 
-				--todo
-			
-			elseif tag=='source' then
-				--todo
+			local prefix, tag = el:getTag():match("^(.-):(.+)$")
+			if not prefix then
+				prefix, tag = "", el:getTag()
 			end
+			local cb = tags_callbacks[prefix] and tags_callbacks[prefix][tag]
+			if cb then cb(entry, el, entry_base) end
 		end
 		
 		--wrap up rss guid
@@ -150,7 +171,7 @@ local function atom_person_construct(person_el, base_uri)
 	return dude
 end
 
-local function parse_atom(root, base_uri)
+local function parse_atom(root, base_uri, callbacks)
 	local res = {}
 	local feed = {
 		links = {},
@@ -164,6 +185,9 @@ local function parse_atom(root, base_uri)
 	if		version=="1.0" or root:getAttr('xmlns')=='http://www.w3.org/2005/Atom' then res.version='atom10'
 	elseif	version=="0.3" then res.version='atom03'
 	else						res.version='atom' end
+
+	-- force default callbacks if they are not already set
+	callbacks[""] = callbacks[""] or ENTRY_MAPPING["http://www.w3.org/2005/Atom"]
 
 	for i, el in ipairs(root:getChildren('*')) do
 		local tag = el:getTag()
@@ -241,11 +265,11 @@ local function parse_atom(root, base_uri)
 		end
 	end
 	
-	res.entries=parse_entries(root:getChildren('entry'),'atom', root_base)
+	res.entries=parse_entries(root:getChildren('entry'), callbacks, 'atom', root_base)
 	return res
 end
 	
-local function parse_rss(root, base_uri)
+local function parse_rss(root, base_uri, callbacks)
 		
 	local channel = root:getChild({'channel', 'rdf:channel'})
 	local channel_base = rebase(channel, base_uri)
@@ -264,6 +288,9 @@ local function parse_rss(root, base_uri)
 	else
 		res.version='rss20'
 	end
+
+	-- set callbacks (force common prefixes like atom: or dc: even if they were not declared ?)
+	callbacks[""] = ENTRY_MAPPING.rss20
 
 	for i, el in ipairs(channel:getChildren('*')) do
 		local el_base=rebase(el, channel_base)
@@ -335,7 +362,7 @@ local function parse_rss(root, base_uri)
 		end
 	end
 	
-	res.entries=parse_entries(channel:getChildren('item'),'rss', channel_base)
+	res.entries=parse_entries(channel:getChildren('item'), callbacks, 'rss', channel_base)
 	return res
 end
 
@@ -351,10 +378,22 @@ function parse(xml_string, base_url)
 	if not lom then return nil, "couldn't parse xml. lxp says: " .. err or "nothing" end
 	local rootElement = XMLElement.new(lom)
 	local root_tag = rootElement:getTag():lower()
+
+	-- add namespace callbacks
+	local callbacks = { }
+	for _, attr in ipairs(rootElement:getAttributes()) do
+		local ns = attr:match("xmlns:(.*)")
+		if ns then
+			callbacks[ns] = ENTRY_MAPPING[rootElement:getAttr(attr)]
+		end
+	end
+	-- default callbacks (if declared)
+	callbacks[""] = ENTRY_MAPPING[rootElement:getAttr("xmlns")]
+
 	if root_tag=='rdf:rdf' or root_tag=='rss' then
-		return parse_rss(rootElement, base_url)
+		return parse_rss(rootElement, base_url, callbacks)
 	elseif root_tag=='feed' then
-		return parse_atom(rootElement, base_url)
+		return parse_atom(rootElement, base_url, callbacks)
 	else
 		return nil, "unknown feed format"
 	end
