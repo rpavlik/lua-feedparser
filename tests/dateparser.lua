@@ -20,6 +20,10 @@ assert(dateparser.parse('1980-01-09')==316224000)
 assert(dateparser.parse('1980-03-01')==320716800)
 assert(dateparser.parse('2003-12-31T10:14:55-08:00')==1072894495)
 
+print("Some RSS20")
+print("", dateparser.parse('Thu, 01 Mar 2012 09:54:06 -0500'))
+assert(dateparser.parse('Thu, 01 Mar 2012 09:54:06 -0500'))
+
 
 print("before unix epoch")
 if dateparser.parse('09 Dec 1965 07:45:51 PDT')~=-128164449  
